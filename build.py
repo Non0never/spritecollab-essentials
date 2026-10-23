@@ -134,6 +134,47 @@ def previous_index(repository, previous, work):
     return index
 
 
+def tracker_changes(current, previous):
+    def flatten(nodes, path=(), names=()):
+        result = {}
+        for key, node in nodes.items():
+            labels = names + ((node['name'],) if node.get('name') else ())
+            result[path + (key,)] = (labels, {k: v for k, v in node.items() if k != 'subgroups'})
+            result.update(flatten(node.get('subgroups', {}), path + (key,), labels))
+        return result
+    old, new = flatten(previous), flatten(current)
+    changes = []
+    for path in sorted(old.keys() | new.keys()):
+        labels, node = new.get(path, old.get(path))
+        before = old.get(path, ((), {}))[1]
+        after = new.get(path, ((), {}))[1]
+        fields = {key for key in before.keys() | after.keys() if before.get(key) != after.get(key)}
+        if not fields:
+            continue
+        name = ' / '.join(labels) or '/'.join(path)
+        details = []
+        links = {field for field in fields if field.endswith('_link')}
+        if links:
+            details.append('download links updated')
+        if fields - links:
+            details.append('tracker metadata updated (' + ', '.join(sorted(fields - links)) + ')')
+        changes.append('- ' + name + ': ' + '; '.join(details) + '.')
+    if not changes:
+        return ''
+    return '### Source updates\n\n' + '\n'.join(changes) + '\n'
+
+
+def upstream_changes(source, previous):
+    if not previous:
+        return ''
+    commit = previous['source_commit']
+    current = json.loads((source / 'tracker.json').read_text())
+    raw = subprocess.check_output(['gh', 'api',
+        f'repos/PMDCollab/SpriteCollab/contents/tracker.json?ref={commit}',
+        '-H', 'Accept: application/vnd.github.raw+json'], text=True)
+    return tracker_changes(current, json.loads(raw))
+
+
 def release_changes(current, previous):
     if previous is None:
         return 'First release of the complete pack.\n', 'First release of the complete pack.\n'
@@ -158,12 +199,11 @@ def release_changes(current, previous):
             continue
         full += ['### ' + title, '']
         short += ['### ' + title, '']
-        for number, (variant, names) in enumerate(sorted(variants.items())):
+        for variant, names in sorted(variants.items()):
             labels = sorted(names)
             full.append('- ' + variant + ': ' + ', '.join(labels))
-            if number < 4:
-                brief = ', '.join(labels[:6]) + (', …' if len(labels) > 6 else '')
-                short.append('- ' + variant + ': ' + brief)
+            brief = ', '.join(labels[:6]) + (', …' if len(labels) > 6 else '')
+            short.append('- ' + variant + ': ' + brief)
         full.append('')
         short.append('')
     for line in sorted(metadata):
@@ -311,6 +351,11 @@ def main():
         print('Comparing exported sprites and portraits with the previous release.', flush=True)
         index = export_index(output)
         full_changes, short_changes = release_changes(index, old_index)
+        if old_index and index['source_commit'] != old_index['source_commit']:
+            source_changes = upstream_changes(source, old_index)
+            if source_changes:
+                full_changes += '\n' + source_changes
+                short_changes += '\n' + source_changes
         (output / 'changes.md').write_text(full_changes, encoding='utf-8')
         assets, originals = package(source, output, releases)
         index_path = releases / 'sprite-index.json.gz'
